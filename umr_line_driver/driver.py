@@ -5,6 +5,8 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageMess
     StickerSendMessage, VideoMessage, AudioMessage
 import asyncio
 from typing import Dict, DefaultDict, Union
+from typing_extensions import Literal
+from pydantic import Field
 from io import BytesIO
 from PIL import Image
 from unified_message_relay.Core import UMRLogging
@@ -12,41 +14,46 @@ from unified_message_relay.Core import UMRDriver
 from unified_message_relay.Core import UMRConfig
 from unified_message_relay.Core.UMRType import UnifiedMessage, MessageEntity, ChatType, EntityType
 from unified_message_relay.Core.UMRMessageRelation import set_ingress_message_id, set_egress_message_id
-from unified_message_relay.Util.Helper import check_attribute, unparse_entities_to_markdown
+from unified_message_relay.Util.Helper import unparse_entities_to_markdown
 import threading
 import os
 from uuid import uuid4
 from collections import defaultdict
 from PIL import ImageFile
-ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+
+class LineDriverConfig(UMRConfig.BaseDriverConfig):
+    Base: Literal['Line']
+    ChannelID: str
+    BotToken: str
+    WebHookToken: str
+    WebHookURL: str
+    WebHookPort: int = Field(28080, ge=0, le=65535)
+    HTTPSCert: str
+    HTTPSKey: str
+    HTTPSCA: str
+
+
+UMRConfig.register_driver_config(LineDriverConfig)
 
 
 class LineDriver(UMRDriver.BaseDriverMixin):
     def __init__(self, name):
+        super().__init__(name)
+
         self.name = name
         self.logger = UMRLogging.get_logger(f'UMRDriver.{self.name}')
         self.logger.debug(f'Started initialization for {self.name}')
         self.loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
         self.loop.set_exception_handler(self.handle_exception)
-        self.config: Dict = UMRConfig.config['Driver'][self.name]
+        self.config: LineDriverConfig = UMRConfig.config.Driver[self.name]
         self.handler: WebhookHandlerAsync
-        attributes = [
-            ('ChannelID', False, None),
-            ('BotToken', False, None),
-            ('WebHookToken', False, None),
-            ('WebHookURL', False, None),
-            ('WebHookPort', False, None),
-            ('HTTPSCert', False, None),
-            ('HTTPSKey', False, None),
-            ('HTTPSCA', False, None),
-        ]
-        check_attribute(self.config, attributes, self.logger)
 
         self.user_names: Dict[str, str] = dict()  # [user_id, username]
         self._message_id = 0
-        self.data_root = UMRConfig.config['DataRoot']
-        self.channel_id = self.config['ChannelID']
-        self.image_webhook_url = self.config.get('WebHookURL') + ':' + str(self.config.get('WebHookPort')) + '/image/'
+        self.data_root = UMRConfig.config.DataRoot
+        self.channel_id = self.config.ChannelID
+        self.image_webhook_url = self.config.WebHookURL + ':' + str(self.config.WebHookPort) + '/image/'
 
         # mapping between internal type and external type
         self.chat_type_dict = {
@@ -60,9 +67,9 @@ class LineDriver(UMRDriver.BaseDriverMixin):
         self.loop = asyncio.new_event_loop()
 
         transport = HttpXClient()
-        self.bot = LineBotApiAsync(self.config['BotToken'], http_client=transport)
+        self.bot = LineBotApiAsync(self.config.BotToken, http_client=transport)
         self.app = Quart(__name__)
-        self.handler = WebhookHandlerAsync(self.config['WebHookToken'])
+        self.handler = WebhookHandlerAsync(self.config.WebHookToken)
 
         # previous reply token, try to save push api limit
         self.reply_token: DefaultDict[str, str] = defaultdict(lambda: '')
@@ -111,9 +118,9 @@ class LineDriver(UMRDriver.BaseDriverMixin):
             set_ingress_message_id(src_platform=self.name, src_chat_id=chat_id, src_chat_type=_chat_type,
                                    src_message_id=pseudo_message_id, user_id=0)
             if isinstance(event.message, TextMessage):
-                message.message = event.message.text
+                message.text = event.message.text
             elif isinstance(event.message, StickerMessage):
-                message.message = 'Sent a sticker'
+                message.text = 'Sent a sticker'
             elif isinstance(event.message, ImageMessage):
                 message_content = await self.bot.get_message_content(event.message.id)
                 image_content = message_content.content
@@ -122,7 +129,7 @@ class LineDriver(UMRDriver.BaseDriverMixin):
                 image.save(image_path)
                 message.image = image_path
             else:
-                message.message = 'Unsupported message type'
+                message.text = 'Unsupported message type'
             await self.receive(message)
 
     @property
@@ -157,10 +164,10 @@ class LineDriver(UMRDriver.BaseDriverMixin):
             nonlocal self
             asyncio.set_event_loop(self.loop)
 
-            task = self.app.run_task(host='0.0.0.0', port=self.config['WebHookPort'],
-                                     ca_certs=self.config['HTTPSCA'],
-                                     keyfile=self.config['HTTPSKey'],
-                                     certfile=self.config['HTTPSCert'])
+            task = self.app.run_task(host='0.0.0.0', port=self.config.WebHookPort,
+                                     ca_certs=self.config.HTTPSCA,
+                                     keyfile=self.config.HTTPSKey,
+                                     certfile=self.config.HTTPSCert)
 
             self.loop.create_task(task)
             self.loop.run_forever()
@@ -235,7 +242,7 @@ class LineDriver(UMRDriver.BaseDriverMixin):
                                                                       preview_image_url=self.image_webhook_url + image_thumb)
                 )
                 self.logger.debug('Finished sending image')
-        if message.message:
+        if message.text:
             message_text = unparse_entities_to_markdown(message, EntityType.PLAIN)
             _message = TextSendMessage(text=message_prefix + message_text)
             if self.reply_token[to_chat]:
